@@ -1,11 +1,12 @@
 # =================================================================================================
-# Contributing Authors:     Harshini Ponnam
-# Email Addresses:          hpo245@uky.edu
-# Date:                     2025-11-24
+# Contributing Authors:      Harshini Ponnam, Rudwika Manne, Jayadeep Kothapalli
+# Email Addresses:           hpo245@uky.edu, rma425@uky.edu, jsko232@uky.edu
+# Date:                     2025-11-23
 # Purpose:                  Pong game client - Tkinter start screen (if available) or CLI fallback.
 #                           Connects to TCP server using TCP sockets, sends paddle movement, and
 #                           renders authoritative game state from the server using Pygame.
 #                           Uses a background thread to receive state to reduce input lag.
+#                           Supports "reset" (press R after win) to play again.
 # Misc:                     CS 371 Fall 2025 Project
 # =================================================================================================
  
@@ -34,7 +35,15 @@ FONTS_DIR = ASSETS_DIR / "fonts"
 IMAGES_DIR = ASSETS_DIR / "images"
 SOUNDS_DIR = ASSETS_DIR / "sounds"
  
- 
+#---------------------------------------------------------------------------------------------
+# recv_state function
+# Author:      Harshini Ponnam
+# Purpose:     Reads a single state line from the server and parses it into paddle positions,
+#              ball position, and scores for both players.
+# Pre:         sock_file is a text-mode file-like object wrapping the TCP socket, opened
+#              for reading with one state update per line.
+# Post:        Returns a 6-tuple (l_y, r_y, b_x, b_y, l_score, r_score) on success, or
+#              None if the connection is closed or the data format is invalid.
 # ---------------------------------------------------------------------------------------------
 # Networking helper: receive one state line from server using readline()
 # ---------------------------------------------------------------------------------------------
@@ -64,7 +73,18 @@ def recv_state(sock_file: TextIO) -> Optional[Tuple[int, int, int, int, int, int
         print("recv_state: exception while reading:", e)
         return None
  
- 
+#---------------------------------------------------------------------------------------------
+# receive_loop function
+# Author:      Harshini Ponnam
+# Purpose:     Runs in a background thread to continuously receive state updates from the
+#              server and write them into a shared dictionary used by the main game loop.
+# Pre:         sock_file wraps the connected TCP socket; shared_state is a dict containing
+#              keys for paddle positions, ball position, scores, and a 'connected' flag;
+#              state_lock is a threading.Lock protecting access to shared_state.
+# Post:        While valid data is received, shared_state is updated with the latest values.
+#              If the server closes or sends bad data, 'connected' is set to False and the
+#              thread exits, allowing the main loop to shut down cleanly.
+
 # ---------------------------------------------------------------------------------------------
 # Background receiver thread: keeps shared state updated without blocking the game loop
 # ---------------------------------------------------------------------------------------------
@@ -90,7 +110,6 @@ def receive_loop(sock_file: TextIO, shared_state: dict, state_lock: Lock) -> Non
             shared_state["b_y"] = b_y
             shared_state["lScore"] = l_score
             shared_state["rScore"] = r_score
- 
  
 # ---------------------------------------------------------------------------------------------
 # Main game loop - uses shared_state updated by background thread
@@ -192,6 +211,15 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
                     playerPaddleObj.moving = "down"
                 elif event.key == pygame.K_UP:
                     playerPaddleObj.moving = "up"
+ 
+                # New: allow reset after game over with R key
+                if (lScore > 4 or rScore > 4) and event.key == pygame.K_r:
+                    try:
+                        client.sendall(b"reset\n")
+                        print("Sent reset request to server.")
+                    except Exception as e:
+                        print("Error sending reset:", e)
+ 
             elif event.type == pygame.KEYUP:
                 if event.key in (pygame.K_UP, pygame.K_DOWN):
                     playerPaddleObj.moving = ""
@@ -284,26 +312,27 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
     pygame.quit()
     return
  
- 
-# Author:      Jayadeep Kothapalli
+#---------------------------------------------------------------------------------------------
+#joinServer function
+# Author:      Rudwika Manne
 # Purpose:     Connects the client to the Pong server using the IP and port entered in the Tkinter UI.
-#              After a successful connection, receives the initial configuration from the server 
+#              After a successful connection, receives the initial configuration from the server
 #              (screen width, screen height, and paddle assignment) and then launches the game.
-# Pre:         The Tkinter window is running. The user has entered a valid IP and port. 
+# Pre:         The Tkinter window is running. The user has entered a valid IP and port.
 #              The server must already be running and listening for connections.
 # Post:        If connection succeeds, the Tkinter window closes and playGame() begins.
 #              If connection fails, an error message is displayed in the errorLabel widget.
 def joinServer(ip: str, port: str, errorLabel, app) -> None:
     """
     Fired when the Join button is clicked on the Tkinter screen.
-
+ 
     ip:         String holding the server IP
     port:       String holding the server port
     errorLabel: Tk label widget to show messages to the user
     app:        Tk window object, so we can close it when the game starts
     """
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
+ 
     # Validate and convert port
     try:
         server_port = int(port)
@@ -311,7 +340,7 @@ def joinServer(ip: str, port: str, errorLabel, app) -> None:
         errorLabel.config(text="Port must be an integer.")
         errorLabel.update()
         return
-
+ 
     # Try to connect to server
     try:
         client.connect((ip, server_port))
@@ -319,7 +348,7 @@ def joinServer(ip: str, port: str, errorLabel, app) -> None:
         errorLabel.config(text=f"Could not connect: {e}")
         errorLabel.update()
         return
-
+ 
     # Receive initial configuration from server: "width height side\n"
     try:
         cfg = client.recv(1024).decode().strip()
@@ -329,27 +358,28 @@ def joinServer(ip: str, port: str, errorLabel, app) -> None:
             errorLabel.update()
             client.close()
             return
-
+ 
         screenWidth = int(parts[0])
         screenHeight = int(parts[1])
         playerPaddle = parts[2]  # "left" or "right"
-
+ 
         errorLabel.config(
             text=f"Connected! Screen: {screenWidth}x{screenHeight}, you are {playerPaddle} paddle."
         )
         errorLabel.update()
-
+ 
     except Exception as e:
         errorLabel.config(text=f"Error receiving config: {e}")
         errorLabel.update()
         client.close()
         return
-
+ 
     # Close Tkinter window and start the game
     app.withdraw()  # Hide Tk window
     playGame(screenWidth, screenHeight, playerPaddle, client)
     app.quit()      # End Tk event loop after game exits
  
+
 def startScreen():
     """Tkinter-based start screen with logo, IP, and port fields."""
     app = tk.Tk()
@@ -374,7 +404,7 @@ def startScreen():
  
     portEntry = tk.Entry(app)
     portEntry.grid(column=1, row=2)
-    portEntry.insert(0, "6000")  # default to 6000
+    portEntry.insert(0, "6000")  # default to 6000, since server uses that
  
     errorLabel = tk.Label(app, text="")
     errorLabel.grid(column=0, row=4, columnspan=2)
@@ -388,7 +418,18 @@ def startScreen():
  
     app.mainloop()
  
- 
+ #---------------------------------------------------------------------------------------------
+# joinServer_cli function
+# Author:      Rudwika Manne
+# Purpose:     Provides a simple command-line interface for connecting to the Pong server
+#              when Tkinter is not available. Prompts the user for IP and port, connects,
+#              reads the initial configuration, and then starts the game loop.
+# Pre:         The program is running in a terminal environment where stdin/stdout are
+#              available. The server must already be running and reachable at the given
+#              IP/port.
+# Post:        On success, calls playGame() with the server-provided screen dimensions and
+#              paddle assignment. On failure, prints an error message and returns without
+#              starting the game.
 # ---------------------------------------------------------------------------------------------
 # CLI-based join (used when Tk is NOT available)
 # ---------------------------------------------------------------------------------------------
