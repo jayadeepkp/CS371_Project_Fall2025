@@ -285,20 +285,25 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
     return
  
  
-# ---------------------------------------------------------------------------------------------
-# Tkinter-based join (used when Tk is available)
-# ---------------------------------------------------------------------------------------------
+# Author:      Jayadeep Kothapalli
+# Purpose:     Connects the client to the Pong server using the IP and port entered in the Tkinter UI.
+#              After a successful connection, receives the initial configuration from the server 
+#              (screen width, screen height, and paddle assignment) and then launches the game.
+# Pre:         The Tkinter window is running. The user has entered a valid IP and port. 
+#              The server must already be running and listening for connections.
+# Post:        If connection succeeds, the Tkinter window closes and playGame() begins.
+#              If connection fails, an error message is displayed in the errorLabel widget.
 def joinServer(ip: str, port: str, errorLabel, app) -> None:
     """
     Fired when the Join button is clicked on the Tkinter screen.
- 
+
     ip:         String holding the server IP
     port:       String holding the server port
     errorLabel: Tk label widget to show messages to the user
     app:        Tk window object, so we can close it when the game starts
     """
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
- 
+
     # Validate and convert port
     try:
         server_port = int(port)
@@ -306,7 +311,7 @@ def joinServer(ip: str, port: str, errorLabel, app) -> None:
         errorLabel.config(text="Port must be an integer.")
         errorLabel.update()
         return
- 
+
     # Try to connect to server
     try:
         client.connect((ip, server_port))
@@ -314,7 +319,7 @@ def joinServer(ip: str, port: str, errorLabel, app) -> None:
         errorLabel.config(text=f"Could not connect: {e}")
         errorLabel.update()
         return
- 
+
     # Receive initial configuration from server: "width height side\n"
     try:
         cfg = client.recv(1024).decode().strip()
@@ -324,27 +329,26 @@ def joinServer(ip: str, port: str, errorLabel, app) -> None:
             errorLabel.update()
             client.close()
             return
- 
+
         screenWidth = int(parts[0])
         screenHeight = int(parts[1])
         playerPaddle = parts[2]  # "left" or "right"
- 
+
         errorLabel.config(
             text=f"Connected! Screen: {screenWidth}x{screenHeight}, you are {playerPaddle} paddle."
         )
         errorLabel.update()
- 
+
     except Exception as e:
         errorLabel.config(text=f"Error receiving config: {e}")
         errorLabel.update()
         client.close()
         return
- 
+
     # Close Tkinter window and start the game
     app.withdraw()  # Hide Tk window
     playGame(screenWidth, screenHeight, playerPaddle, client)
     app.quit()      # End Tk event loop after game exits
- 
  
 def startScreen():
     """Tkinter-based start screen with logo, IP, and port fields."""

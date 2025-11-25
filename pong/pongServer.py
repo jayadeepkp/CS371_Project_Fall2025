@@ -23,7 +23,10 @@ SCREEN_HEIGHT = 480
 # How many points to win
 WIN_SCORE = 5
 
-
+# Author:      Jayadeep Kothapalli
+# Purpose:     Handle incoming messages from one client and update movement state.
+# Pre:         conn is a connected TCP socket; move_dict is a shared dict with key "value".
+# Post:        move_dict["value"] is updated based on messages from this client.
 def handle_client_input(conn: socket.socket, move_dict: dict, reset_flag: dict, name: str) -> None:
     """
     Thread function to handle incoming messages from a single client.
@@ -52,7 +55,10 @@ def handle_client_input(conn: socket.socket, move_dict: dict, reset_flag: dict, 
     except Exception as e:
         print(f"[SERVER] Exception in handle_client_input for {name}: {e}")
 
-
+# Author:      Jayadeep Kothapalli
+# Purpose:     Accept two clients, send them config, and run the main Pong game loop.
+# Pre:         host/port are free; expects exactly two clients for left/right paddles.
+# Post:        Broadcasts game state until a client disconnects, then shuts down server.
 def run_server(host: str = "0.0.0.0", port: int = 6000) -> None:
     """
     Main server logic:
