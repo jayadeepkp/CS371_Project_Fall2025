@@ -158,7 +158,7 @@ def run_server(host: str = "0.0.0.0", port: int = 6000) -> None:
                     rightPaddle.rect.y -= rightPaddle.speed
 
             # If someone has already won, keep ball still (but allow reset)
-            if lScore > WIN_SCORE or rScore > WIN_SCORE:
+            if lScore >= WIN_SCORE or rScore >= WIN_SCORE:
                 # do nothing special here; clients will show win screen
                 pass
             else:
