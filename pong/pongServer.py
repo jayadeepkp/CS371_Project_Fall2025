@@ -1,36 +1,36 @@
 # =================================================================================================
-# Contributing Authors:     Jayadeep Kothapalli
+# Contributing Authors:	    Jayadeep Kothapalli
 # Email Addresses:          jayadeep.kothapalli@uky.edu
-# Date:                     2025-11-24
+# Date:                     2025-11-23
 # Purpose:                  Multi-threaded TCP Pong server.
-#                           Accepts two clients, assigns left/right paddles, runs the
-#                           authoritative game loop (ball, paddles, score), and broadcasts
-#                           state to both clients.
+#                           Accepts two clients, assigns left/right paddles, runs authoritative
+#                           game loop (ball, paddles, score), and broadcasts state to both clients.
+#                           Supports "reset" command so players can play multiple games.
 # Misc:                     CS 371 Fall 2025 Project
 # =================================================================================================
 
 import socket
 import threading
+from pathlib import Path
 
 import pygame
 from assets.code.helperCode import Paddle, Ball
 
-# Global constants
-SCREEN_WIDTH: int = 640
-SCREEN_HEIGHT: int = 480
-WIN_SCORE: int = 5  # First to this many points wins a game
+# Screen dimensions (must match what clients expect)
+SCREEN_WIDTH = 640
+SCREEN_HEIGHT = 480
+
+# How many points to win
+WIN_SCORE = 5
 
 
-# Author:      Jayadeep Kothapalli
-# Purpose:     Handle incoming messages from one client and update movement state.
-# Pre:         conn is a connected TCP socket; move_dict is a shared dict with key "value".
-# Post:        move_dict["value"] is updated based on messages from this client.
-def handle_client_input(conn: socket.socket, move_dict: dict, name: str) -> None:
+def handle_client_input(conn: socket.socket, move_dict: dict, reset_flag: dict, name: str) -> None:
     """
     Thread function to handle incoming messages from a single client.
 
     Messages:
       "up" / "down" / ""   -> update move_dict["value"]
+      "reset"              -> set reset_flag["value"] = True
     """
     try:
         with conn:
@@ -47,14 +47,12 @@ def handle_client_input(conn: socket.socket, move_dict: dict, name: str) -> None
                     msg = line.strip()
                     if msg in ("up", "down", ""):
                         move_dict["value"] = msg
+                    elif msg == "reset":
+                        reset_flag["value"] = True
     except Exception as e:
         print(f"[SERVER] Exception in handle_client_input for {name}: {e}")
 
 
-# Author:      Jayadeep Kothapalli
-# Purpose:     Accept two clients, send them config, and run the main Pong game loop.
-# Pre:         host/port are free; expects exactly two clients for left/right paddles.
-# Post:        Broadcasts game state until a client disconnects, then shuts down server.
 def run_server(host: str = "0.0.0.0", port: int = 6000) -> None:
     """
     Main server logic:
@@ -85,19 +83,20 @@ def run_server(host: str = "0.0.0.0", port: int = 6000) -> None:
     config_right = f"{SCREEN_WIDTH} {SCREEN_HEIGHT} right\n".encode()
     client_right.sendall(config_right)
 
-    # Shared movement state
+    # Shared movement and reset flag
     left_move = {"value": ""}
     right_move = {"value": ""}
+    reset_flag = {"value": False}
 
     # Start input threads
     t_left = threading.Thread(
         target=handle_client_input,
-        args=(client_left, left_move, "LEFT"),
+        args=(client_left, left_move, reset_flag, "LEFT"),
         daemon=True,
     )
     t_right = threading.Thread(
         target=handle_client_input,
-        args=(client_right, right_move, "RIGHT"),
+        args=(client_right, right_move, reset_flag, "RIGHT"),
         daemon=True,
     )
     t_left.start()
@@ -121,10 +120,20 @@ def run_server(host: str = "0.0.0.0", port: int = 6000) -> None:
     lScore = 0
     rScore = 0
 
-    print("[SERVER] Game loop started (no Play Again feature yet).")
+    print("[SERVER] Game loop started.")
 
     try:
         while True:
+            # Handle reset request (from either client)
+            if reset_flag["value"]:
+                print("[SERVER] Reset requested, resetting game state.")
+                lScore = 0
+                rScore = 0
+                leftPaddle.rect.y = paddleStartPosY
+                rightPaddle.rect.y = paddleStartPosY
+                ball.reset(nowGoing="left")
+                reset_flag["value"] = False
+
             # Update paddles based on last movement commands
             # Left paddle
             if left_move["value"] == "down":
@@ -142,9 +151,9 @@ def run_server(host: str = "0.0.0.0", port: int = 6000) -> None:
                 if rightPaddle.rect.top > 10:
                     rightPaddle.rect.y -= rightPaddle.speed
 
-            # If someone has already won, keep ball still (no reset)
+            # If someone has already won, keep ball still (but allow reset)
             if lScore > WIN_SCORE or rScore > WIN_SCORE:
-                # Ball does not move anymore
+                # do nothing special here; clients will show win screen
                 pass
             else:
                 # Ball movement
@@ -169,10 +178,7 @@ def run_server(host: str = "0.0.0.0", port: int = 6000) -> None:
                     ball.hitWall()
 
             # Prepare state line for both clients
-            state_line = (
-                f"{leftPaddle.rect.y} {rightPaddle.rect.y} "
-                f"{ball.rect.x} {ball.rect.y} {lScore} {rScore}\n"
-            )
+            state_line = f"{leftPaddle.rect.y} {rightPaddle.rect.y} {ball.rect.x} {ball.rect.y} {lScore} {rScore}\n"
             data = state_line.encode()
 
             # Send state to both clients
@@ -198,7 +204,7 @@ def run_server(host: str = "0.0.0.0", port: int = 6000) -> None:
         server.close()
         pygame.quit()
         print("[SERVER] Server shut down.")
-
+        
 
 if __name__ == "__main__":
     run_server(host="0.0.0.0", port=6000)
