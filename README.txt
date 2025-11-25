@@ -3,13 +3,14 @@ Contact Info
 
 Group Members & Email Addresses:
 
-    Person 1, person1@uky.edu
-    Person 2, person2@uky.edu
+    Jayadeep Kothapalli, jsko232@uky.edu
+    Harshini Ponnam, hpo245@uky.edu
+    Rudwika Manne, rma425@uky.edu
 
 Versioning
 ==========
 
-Github Link: 
+Github Link: https://github.com/jayadeepkp/CS371_Project_Fall2025
 
 General Info
 ============
