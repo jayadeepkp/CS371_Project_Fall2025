@@ -1,7 +1,7 @@
 # =================================================================================================
 # Contributing Authors:      Harshini Ponnam, Rudwika Manne, Jayadeep Kothapalli
 # Email Addresses:           hpo245@uky.edu, rma425@uky.edu, jsko232@uky.edu
-# Date:                      2025-11-23
+# Date:                      2025-11-26
 # Purpose:                   Pong game client - Tkinter start screen (if available) or CLI fallback.
 #                            Connects to TCP server using TCP sockets, sends paddle movement, and
 #                            renders authoritative game state from the server using Pygame.
