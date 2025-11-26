@@ -3,11 +3,11 @@
 # Email Addresses:           hpo245@uky.edu, rma425@uky.edu, jsko232@uky.edu
 # Date:                      2025-11-23
 # Purpose:                   Pong game client - Tkinter start screen (if available) or CLI fallback.
-#                            Connects to TCP server using TCP sockets, sends paddle movement (for
-#                            players), and renders authoritative game state from the server using
-#                            Pygame. Uses a background thread to receive state to reduce input lag.
-#                            Supports "reset" (press R after win) to play again and allows
-#                            additional clients to connect as spectators ("spec" role).
+#                            Connects to TCP server using TCP sockets, sends paddle movement, and
+#                            renders authoritative game state from the server using Pygame.
+#                            Uses a background thread to receive state to reduce input lag.
+#                            Supports spectator mode and coordinated "Play Again" rematch:
+#                            both players must press R (send "ready") before a new game starts.
 # Misc:                      CS 371 Fall 2025 Project
 # =================================================================================================
 
@@ -28,7 +28,7 @@ except Exception:
     tk = None
 
 # ---------------------------------------------------------------------------------------------
-# Asset paths (robust regardless of current working directory)
+# Constants / asset paths
 # ---------------------------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent          # .../CS371_Project_Fall2025/pong
 ASSETS_DIR = BASE_DIR / "assets"
@@ -36,8 +36,10 @@ FONTS_DIR = ASSETS_DIR / "fonts"
 IMAGES_DIR = ASSETS_DIR / "images"
 SOUNDS_DIR = ASSETS_DIR / "sounds"
 
+WIN_SCORE = 5  # must match server
 
-#---------------------------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------------------------
 # recv_state function
 # Author:      Harshini Ponnam
 # Purpose:     Reads a single state line from the server and parses it into paddle positions,
@@ -74,7 +76,7 @@ def recv_state(sock_file: TextIO) -> Optional[Tuple[int, int, int, int, int, int
         return None
 
 
-#---------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------
 # receive_loop function
 # Author:      Harshini Ponnam
 # Purpose:     Runs in a background thread to continuously receive state updates from the
@@ -110,24 +112,25 @@ def receive_loop(sock_file: TextIO, shared_state: dict, state_lock: Lock) -> Non
             shared_state["rScore"] = r_score
 
 
-#---------------------------------------------------------------------------------------------
-# playGame function
+# ---------------------------------------------------------------------------------------------
+# Main game loop - uses shared_state updated by background thread
 # Author:      Jayadeep Kothapalli
-# Purpose:     Runs the main networked Pong game loop for this client. Renders paddles, ball,
-#              and score based on game state received from the server, and sends this client's
-#              paddle movement back to the server if the client is a player ("left" or "right").
-#              Supports pressing R after a win to request a reset. If the client is a spectator
-#              ("spec"), it only displays the game and does not send movement or reset commands.
-# Pre:         The TCP socket `client` is already connected to the Pong server, and the server
-#              has sent valid screen dimensions and a paddle side ("left", "right", or "spec").
-# Post:        Opens a Pygame window and runs until the user quits or the server disconnects.
-#              On exit, closes the socket file wrapper, the socket itself, and quits Pygame.
+# Purpose:     Render the Pong game state from the server and send local paddle movement.
+#              Handles keyboard input, draws paddles/ball/score, and shows a "Press R to
+#              Play Again" / "Waiting for other player..." message after someone wins.
+#              When the player presses R, sends "ready" to the server. A new game starts
+#              when the server resets the scores (after both players are ready).
+# Pre:         screenWidth, screenHeight, and playerPaddle are provided by the server's
+#              config line. client is a connected TCP socket. Assets must be present in
+#              the assets/ directory (fonts, sounds, logo).
+# Post:        When the window is closed or connection drops, the socket and pygame
+#              resources are cleaned up and the function returns.
 # ---------------------------------------------------------------------------------------------
 def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: socket.socket) -> None:
     print("Starting playGame with:", screenWidth, screenHeight, playerPaddle)
 
-    # Is this client a spectator (no paddle control)?
-    is_spectator = playerPaddle not in ("left", "right")
+    # Treat "spec" as spectator mode
+    is_spectator = (playerPaddle == "spec")
 
     # Wrap the socket in a file-like object for line-based reading
     sock_file = client.makefile("r")
@@ -145,7 +148,11 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
     }
 
     # Start background receiver thread
-    recv_thread = Thread(target=receive_loop, args=(sock_file, shared_state, state_lock), daemon=True)
+    recv_thread = Thread(
+        target=receive_loop,
+        args=(sock_file, shared_state, state_lock),
+        daemon=True,
+    )
     recv_thread.start()
 
     # Pygame inits
@@ -193,7 +200,7 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
     # Ball (position is driven by server; we just store and draw it)
     ball = Ball(pygame.Rect(screenWidth / 2, screenHeight / 2, 5, 5), -5, 0)
 
-    # Decide which paddle this client controls (if any)
+    # Decide which paddle this client controls (if not spectator)
     if playerPaddle == "left":
         opponentPaddleObj = rightPaddle
         playerPaddleObj = leftPaddle
@@ -201,16 +208,17 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
         opponentPaddleObj = leftPaddle
         playerPaddleObj = rightPaddle
     else:
-        # Spectator: still need references for drawing, but no control
+        # Spectator: no real "player" paddle, but we still need references
         opponentPaddleObj = rightPaddle
-        playerPaddleObj = leftPaddle
+        playerPaddleObj = leftPaddle  # dummy; we won't move it from input
 
-    # Scores and previous values for sound logic
+    # Scores and previous values for sound & rematch logic
     lScore = rScore = 0
     prev_lScore = prev_rScore = 0
     prev_ball_y = ball.rect.y
 
-    sync = 0
+    sent_ready = False  # whether THIS client has already sent "ready" for the current game
+
     running = True
 
     while running:
@@ -222,22 +230,26 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
             if event.type == pygame.QUIT:
                 print("QUIT event received, closing game window.")
                 running = False
+
             elif event.type == pygame.KEYDOWN:
-                # Players can move paddles; spectators cannot
+                # Only players (not spectators) can control paddles
                 if not is_spectator:
                     if event.key == pygame.K_DOWN:
                         playerPaddleObj.moving = "down"
                     elif event.key == pygame.K_UP:
                         playerPaddleObj.moving = "up"
 
-                    # Allow reset after game over with R key (players only)
-                    if (lScore > 4 or rScore > 4) and event.key == pygame.K_r:
-                        try:
-                            client.sendall(b"reset\n")
-                            print("Sent reset request to server.")
-                        except Exception as e:
-                            print("Error sending reset:", e)
-                # Spectators: no paddle movement, no reset command
+                    # Press R to send "ready" AFTER game over (only once)
+                    if (lScore >= WIN_SCORE or rScore >= WIN_SCORE) and event.key == pygame.K_r:
+                        if not sent_ready:
+                            try:
+                                client.sendall(b"ready\n")
+                                sent_ready = True
+                                print("Sent 'ready' for rematch to server.")
+                            except Exception as e:
+                                print("Error sending ready:", e)
+                                running = False
+
             elif event.type == pygame.KEYUP:
                 if not is_spectator and event.key in (pygame.K_UP, pygame.K_DOWN):
                     playerPaddleObj.moving = ""
@@ -249,15 +261,15 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
                 running = False
 
         # -------------------------------------------------------------------------------------
-        # Send this client's movement to the server ("up", "down", or "") for players only
+        # Send this client's movement to the server ("up", "down", or "").
+        # Spectators always send "" (no movement).
         # -------------------------------------------------------------------------------------
-        if not is_spectator:
-            try:
-                move_str = playerPaddleObj.moving
-                client.sendall((move_str + "\n").encode())
-            except Exception as e:
-                print("Error sending to server:", e)
-                running = False
+        try:
+            move_str = "" if is_spectator else playerPaddleObj.moving
+            client.sendall((move_str + "\n").encode())
+        except Exception as e:
+            print("Error sending to server:", e)
+            running = False
 
         # -------------------------------------------------------------------------------------
         # Read latest state snapshot from shared_state (non-blocking)
@@ -269,6 +281,13 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
             b_y = shared_state["b_y"]
             lScore = shared_state["lScore"]
             rScore = shared_state["rScore"]
+
+        # Detect game-over → new-game transition (server reset)
+        game_was_over = (prev_lScore >= WIN_SCORE or prev_rScore >= WIN_SCORE)
+        game_is_over = (lScore >= WIN_SCORE or rScore >= WIN_SCORE)
+        if game_was_over and not game_is_over:
+            # Scores went from win back to non-win ⇒ new game started.
+            sent_ready = False
 
         # Update paddles and ball with latest state
         leftPaddle.rect.y = l_y
@@ -289,16 +308,19 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
         ):
             bounceSound.play()
 
-        # If the game is over, display the win message
-        if lScore > 4 or rScore > 4:
-            winText = "Player 1 Wins! " if lScore > 4 else "Player 2 Wins! "
+        # If the game is over, display the win message + R prompts (no boxes, just text)
+        if lScore >= WIN_SCORE or rScore >= WIN_SCORE:
+            # Big win text (use ALL CAPS so the font has glyphs)
+            winText = "PLAYER 1 WINS!" if lScore >= WIN_SCORE else "PLAYER 2 WINS!"
             textSurface = winFont.render(winText, False, WHITE, (0, 0, 0))
             textRect = textSurface.get_rect()
-            textRect.center = ((screenWidth / 2), screenHeight / 2)
+            textRect.center = (screenWidth // 2, screenHeight // 2)
             winMessage = screen.blit(textSurface, textRect)
+
         else:
             # Ball is already updated by server; just draw it.
             pygame.draw.rect(screen, WHITE, ball)
+            winMessage = pygame.Rect(0, 0, 0, 0)  # nothing to update for winMessage
 
         # Draw the dotted center line
         for i in centerLine:
@@ -322,8 +344,6 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
         )
         clock.tick(60)   # 60 FPS
 
-        sync += 1
-
     # Clean up when loop ends
     print("Exiting playGame() cleanly.")
     sock_file.close()
@@ -332,25 +352,13 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
     return
 
 
-#---------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------
 # joinServer function
 # Author:      Rudwika Manne
-# Purpose:     Connects the client to the Pong server using the IP and port entered in the Tkinter UI.
-#              After a successful connection, receives the initial configuration from the server
-#              (screen width, screen height, and role: left/right/spec) and then launches the game.
-# Pre:         The Tkinter window is running. The user has entered a valid IP and port.
-#              The server must already be running and listening for connections.
-# Post:        If connection succeeds, the Tkinter window closes and playGame() begins.
-#              If connection fails, an error message is displayed in the errorLabel widget.
 # ---------------------------------------------------------------------------------------------
 def joinServer(ip: str, port: str, errorLabel, app) -> None:
     """
     Fired when the Join button is clicked on the Tkinter screen.
-
-    ip:         String holding the server IP
-    port:       String holding the server port
-    errorLabel: Tk label widget to show messages to the user
-    app:        Tk window object, so we can close it when the game starts
     """
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
@@ -382,16 +390,10 @@ def joinServer(ip: str, port: str, errorLabel, app) -> None:
 
         screenWidth = int(parts[0])
         screenHeight = int(parts[1])
-        playerPaddle = parts[2]  # "left", "right", or "spec"
-
-        role_text = (
-            "left paddle" if playerPaddle == "left"
-            else "right paddle" if playerPaddle == "right"
-            else "spectator"
-        )
+        playerPaddle = parts[2]  # "left" or "right" or "spec"
 
         errorLabel.config(
-            text=f"Connected! Screen: {screenWidth}x{screenHeight}, you are {role_text}."
+            text=f"Connected! Screen: {screenWidth}x{screenHeight}, you are {playerPaddle}."
         )
         errorLabel.update()
 
@@ -407,7 +409,11 @@ def joinServer(ip: str, port: str, errorLabel, app) -> None:
     app.quit()      # End Tk event loop after game exits
 
 
-def startScreen():
+# ---------------------------------------------------------------------------------------------
+# startScreen function
+# Author:      Rudwika Manne, Jayadeep Kothapalli
+# ---------------------------------------------------------------------------------------------
+def startScreen() -> None:
     """Tkinter-based start screen with logo, IP, and port fields."""
     app = tk.Tk()
     app.title("Server Info")
@@ -446,17 +452,9 @@ def startScreen():
     app.mainloop()
 
 
-#---------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------
 # joinServer_cli function
 # Author:      Rudwika Manne
-# Purpose:     Provides a simple command-line interface for connecting to the Pong server
-#              when Tkinter is not available. Prompts the user for IP and port, connects,
-#              reads the initial configuration (left/right/spec), and then starts the game loop.
-# Pre:         The program is running in a terminal environment where stdin/stdout are
-#              available. The server must already be running and reachable at the given
-#              IP/port.
-# Post:        On success, calls playGame() with the server-provided screen dimensions and
-#              role. On failure, prints an error message and returns without starting the game.
 # ---------------------------------------------------------------------------------------------
 def joinServer_cli() -> None:
     """
@@ -491,14 +489,9 @@ def joinServer_cli() -> None:
 
         screenWidth = int(parts[0])
         screenHeight = int(parts[1])
-        playerPaddle = parts[2]  # "left", "right", or "spec"
+        playerPaddle = parts[2]  # "left" or "right" or "spec"
 
-        role_text = (
-            "left paddle" if playerPaddle == "left"
-            else "right paddle" if playerPaddle == "right"
-            else "spectator"
-        )
-        print(f"Connected! Screen: {screenWidth}x{screenHeight}, you are {role_text}.")
+        print(f"Connected! Screen: {screenWidth}x{screenHeight}, you are {playerPaddle}.")
 
     except Exception as e:
         print(f"Error receiving config: {e}")

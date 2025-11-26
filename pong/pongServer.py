@@ -1,24 +1,24 @@
 # =================================================================================================
-# Contributing Authors:	    Jayadeep Kothapalli,Harshini Ponnam
+# Contributing Authors:	    Jayadeep Kothapalli, Harshini Ponnam
 # Email Addresses:          jsko232@uky.edu, hpo245@uky.edu
 # Date:                     2025-11-23
 # Purpose:                  Multi-threaded TCP Pong server.
 #                           Accepts two clients as players (left/right), plus any number of
 #                           additional spectator clients. Runs authoritative game loop (ball,
 #                           paddles, score) and broadcasts state to all connected clients.
-#                           Supports "reset" command so players can play multiple games.
+#                           Supports coordinated "Play Again" rematch: both players must press R
+#                           (client sends "ready") before a new game starts.
+#                           Also serves a persistent leaderboard on HTTP port 80.
 # Misc:                     CS 371 Fall 2025 Project
 # =================================================================================================
 
 import socket
 import threading
-
-import pygame
-from assets.code.helperCode import Paddle, Ball
-
 import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+import pygame
+from assets.code.helperCode import Paddle, Ball
 
 # Screen dimensions (must match what clients expect)
 SCREEN_WIDTH = 640
@@ -33,16 +33,15 @@ LEADERBOARD_FILE = "leaderboard.json"
 # Protects concurrent access to leaderboard
 leaderboard_lock = threading.Lock()
 
+
 # ---------------------------------------------------------------------------------------------
-# Author(s):    Harshini Ponnam 
-# Purpose:      Helper functions for loading, saving, and updating the persistent leaderboard.
-#               The leaderboard tracks total wins for each player's initials across all games.
-# Pre:          leaderboard.json may or may not exist at startup.
-# Post:         leaderboard.json is read/written safely; leaderboard dictionary is kept in-sync
-#               and protected with a threading lock for multi-threaded access.
+# Leaderboard helpers
+# Author:      Harshini Ponnam
+# Purpose:     Helper functions for loading, saving, and updating the persistent leaderboard.
+#              The leaderboard tracks total wins for each player's initials across all games.
 # ---------------------------------------------------------------------------------------------
 
-def load_leaderboard():
+def load_leaderboard() -> dict:
     """Load leaderboard from disk or return empty dict if not present."""
     try:
         with open(LEADERBOARD_FILE, "r") as f:
@@ -72,18 +71,18 @@ def record_win(initials: str) -> None:
         leaderboard[initials] = leaderboard.get(initials, 0) + 1
         save_leaderboard(leaderboard)
 
+
 # ---------------------------------------------------------------------------------------------
-# Author(s):    Harshini Ponnam 
-# Purpose:      A simple HTTP GET handler that serves a styled HTML leaderboard page at:
-#                   http://<server-ip>/           OR
-#                   http://<server-ip>/leaderboard
-#               Displays all player initials and their accumulated win counts.
-# Pre:          leaderboard dictionary must be populated; access is protected by leaderboard_lock.
-# Post:         Sends an HTML response showing the current leaderboard.
+# HTTP leaderboard handler
+# Author:      Harshini Ponnam
+# Purpose:     A simple HTTP GET handler that serves a styled HTML leaderboard page at:
+#                  http://<server-ip>/           OR
+#                  http://<server-ip>/leaderboard
+#              Displays all player initials and their accumulated win counts.
 # ---------------------------------------------------------------------------------------------
 
 class LeaderboardHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
+    def do_GET(self) -> None:
         if self.path not in ("/", "/leaderboard"):
             self.send_response(404)
             self.end_headers()
@@ -126,16 +125,13 @@ class LeaderboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(html_bytes)
 
-# ---------------------------------------------------------------------------------------------
-# Author(s):    Harshini Ponnam 
-# Purpose:      Starts a background HTTP server on port 80 using LeaderboardHandler. Runs
-#               concurrently with the main Pong game server without blocking gameplay.
-# Pre:          Port 80 must be available (may require administrator privileges on some systems).
-# Post:         A persistent leaderboard webpage is accessible while the Pong game is running.
-# ---------------------------------------------------------------------------------------------
 
-def start_leaderboard_server():
-    """Run a simple HTTP server on port 80 to show the leaderboard."""
+def start_leaderboard_server() -> None:
+    """
+    Author:     Harshini Ponnam
+    Purpose:    Starts a background HTTP server on port 80 using LeaderboardHandler. Runs
+                concurrently with the main Pong game server without blocking gameplay.
+    """
     try:
         httpd = HTTPServer(("0.0.0.0", 80), LeaderboardHandler)
         print("[SERVER] Leaderboard HTTP server running on port 80...")
@@ -143,19 +139,21 @@ def start_leaderboard_server():
     except Exception as e:
         print(f"[SERVER] Could not start leaderboard HTTP server on port 80: {e}")
 
+
 # ---------------------------------------------------------------------------------------------
+# Network helpers
+# ---------------------------------------------------------------------------------------------
+
 # Author:      Jayadeep Kothapalli
-# Purpose:     Handle incoming messages from one client and update movement/reset state.
-# Pre:         conn is a connected TCP socket; move_dict is a shared dict with key "value";
-#              reset_flag is a shared dict with key "value" used to trigger a game reset.
-# Post:        move_dict["value"] is updated based on messages from this client. If a "reset"
-#              message is received, reset_flag["value"] is set to True so the main loop can
-#              reset the game state.
-# ---------------------------------------------------------------------------------------------
+# Purpose:     Handle incoming messages from one client and update movement/ready state.
+# Pre:         conn is a connected TCP socket; move_dict and ready_flag are shared dicts
+#              with key "value" used to track last movement command and rematch readiness.
+# Post:        move_dict["value"] is updated based on "up"/"down"/"" messages.
+#              ready_flag["value"] is set True if a "ready" message is received.
 def handle_client_input(
     conn: socket.socket,
     move_dict: dict,
-    reset_flag: dict,
+    ready_flag: dict,
     name: str
 ) -> None:
     """
@@ -163,7 +161,7 @@ def handle_client_input(
 
     Messages:
       "up" / "down" / ""   -> update move_dict["value"]
-      "reset"              -> set reset_flag["value"] = True
+      "ready"              -> set ready_flag["value"] = True (player pressed R to rematch)
     """
     try:
         with conn:
@@ -180,22 +178,16 @@ def handle_client_input(
                     msg = line.strip()
                     if msg in ("up", "down", ""):
                         move_dict["value"] = msg
-                    elif msg == "reset":
-                        reset_flag["value"] = True
+                    elif msg == "ready":
+                        ready_flag["value"] = True
     except Exception as e:
         print(f"[SERVER] Exception in handle_client_input for {name}: {e}")
 
 
-# ---------------------------------------------------------------------------------------------
 # Author:      Jayadeep Kothapalli
 # Purpose:     Accept additional spectator clients after the two players have connected.
 #              Each spectator receives a "spec" config line and is added to the spectators
 #              list so they receive state updates, but they do not control any paddles.
-# Pre:         server is a bound/listening TCP socket; spectators is a shared list of sockets;
-#              spectators_lock is a threading.Lock protecting access to that list.
-# Post:        As new spectator clients connect, they are sent a config line and appended to
-#              spectators. If the server socket is closed, this loop exits cleanly.
-# ---------------------------------------------------------------------------------------------
 def accept_spectators(
     server: socket.socket,
     spectators: list,
@@ -224,14 +216,14 @@ def accept_spectators(
 
 
 # ---------------------------------------------------------------------------------------------
+# Main server
+# ---------------------------------------------------------------------------------------------
+
 # Author:      Jayadeep Kothapalli
 # Purpose:     Accept two player clients, then any number of spectators, and run the main
 #              Pong game loop. Broadcasts state to all connected clients until someone
-#              disconnects, then shuts down.
-# Pre:         host/port are free to bind. Expects at least two clients to connect for play.
-# Post:        After clients disconnect or an error occurs, closes all sockets and quits
-#              Pygame cleanly.
-# ---------------------------------------------------------------------------------------------
+#              disconnects, then shuts down. Uses a coordinated rematch system: both
+#              players must press R (send "ready") before a new game starts.
 def run_server(host: str = "0.0.0.0", port: int = 6000) -> None:
     """
     Main server logic:
@@ -268,22 +260,21 @@ def run_server(host: str = "0.0.0.0", port: int = 6000) -> None:
     config_right = f"{SCREEN_WIDTH} {SCREEN_HEIGHT} right\n".encode()
     client_right.sendall(config_right)
 
-
-    # Ask the server operator for player initials (used in the leaderboard)
+    # Leaderboard: ask for player initials
     try:
         left_initials = input("Enter initials for LEFT player (e.g., HP): ").strip().upper() or "LEFT"
         right_initials = input("Enter initials for RIGHT player (e.g., RM): ").strip().upper() or "RIGHT"
     except EOFError:
-        # In case input is not available (e.g., some environments), fall back to defaults
         left_initials = "LEFT"
         right_initials = "RIGHT"
 
     # -------------------------------------------------------------------------
-    # Prepare shared movement and reset state
+    # Shared movement and rematch state
     # -------------------------------------------------------------------------
     left_move = {"value": ""}
     right_move = {"value": ""}
-    reset_flag = {"value": False}
+    left_ready = {"value": False}
+    right_ready = {"value": False}
 
     # Spectators: additional clients who can watch the game
     spectators: list[socket.socket] = []
@@ -292,12 +283,12 @@ def run_server(host: str = "0.0.0.0", port: int = 6000) -> None:
     # Start input threads for the two players
     t_left = threading.Thread(
         target=handle_client_input,
-        args=(client_left, left_move, reset_flag, "LEFT"),
+        args=(client_left, left_move, left_ready, "LEFT"),
         daemon=True,
     )
     t_right = threading.Thread(
         target=handle_client_input,
-        args=(client_right, right_move, reset_flag, "RIGHT"),
+        args=(client_right, right_move, right_ready, "RIGHT"),
         daemon=True,
     )
     t_left.start()
@@ -330,23 +321,12 @@ def run_server(host: str = "0.0.0.0", port: int = 6000) -> None:
 
     lScore = 0
     rScore = 0
-    # To avoid counting the same win multiple times before a reset
     winner_recorded = False
+
     print("[SERVER] Game loop started.")
 
     try:
         while True:
-            # Handle reset request (from either player)
-            if reset_flag["value"]:
-                print("[SERVER] Reset requested, resetting game state.")
-                lScore = 0
-                rScore = 0
-                leftPaddle.rect.y = paddleStartPosY
-                rightPaddle.rect.y = paddleStartPosY
-                ball.reset(nowGoing="left")
-                reset_flag["value"] = False
-                winner_recorded = False
-
             # Update paddles based on last movement commands
             # Left paddle
             if left_move["value"] == "down":
@@ -363,10 +343,12 @@ def run_server(host: str = "0.0.0.0", port: int = 6000) -> None:
             elif right_move["value"] == "up":
                 if rightPaddle.rect.top > 10:
                     rightPaddle.rect.y -= rightPaddle.speed
-          
-            # If someone has already won, stop ball movement but allow reset
+
+            # ---------------------------------------------------------------------------------
+            # Win + coordinated rematch logic
+            # ---------------------------------------------------------------------------------
             if lScore >= WIN_SCORE or rScore >= WIN_SCORE:
-                # Record the winner once per game (before reset)
+                # Record winner once
                 if not winner_recorded:
                     if lScore >= WIN_SCORE:
                         record_win(left_initials)
@@ -375,9 +357,22 @@ def run_server(host: str = "0.0.0.0", port: int = 6000) -> None:
                         record_win(right_initials)
                         print(f"[SERVER] Game over. Winner: {right_initials}")
                     winner_recorded = True
-                # No ball movement while game is "frozen" at win state
+
+                # Wait for both players to press R (send "ready")
+                if left_ready["value"] and right_ready["value"]:
+                    print("[SERVER] Both players ready. Starting rematch.")
+                    lScore = 0
+                    rScore = 0
+                    leftPaddle.rect.y = paddleStartPosY
+                    rightPaddle.rect.y = paddleStartPosY
+                    ball.reset(nowGoing="left")
+                    winner_recorded = False
+                    left_ready["value"] = False
+                    right_ready["value"] = False
+
+                # No ball movement while frozen at win state
             else:
-                # Ball movement
+                # Normal ball movement
                 ball.updatePos()
 
                 # Ball out of bounds -> score
@@ -397,7 +392,6 @@ def run_server(host: str = "0.0.0.0", port: int = 6000) -> None:
                 # Ball & wall collisions
                 if ball.rect.colliderect(topWall) or ball.rect.colliderect(bottomWall):
                     ball.hitWall()
-
 
             # Prepare state line for all clients
             state_line = (
@@ -423,7 +417,6 @@ def run_server(host: str = "0.0.0.0", port: int = 6000) -> None:
                     except Exception as e:
                         print(f"[SERVER] Spectator send failed, removing: {e}")
                         dead_specs.append(spec)
-                # Remove any spectators that errored
                 for d in dead_specs:
                     try:
                         d.close()
