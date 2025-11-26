@@ -18,6 +18,7 @@ from threading import Thread, Lock
 
 import pygame
 from assets.code.helperCode import *  # Paddle, Ball, updateScore, etc.
+from security import encrypt_data, decrypt_data
 
 # Try to import tkinter; if not available (e.g., some macOS Python builds), fall back to CLI.
 try:
@@ -51,7 +52,7 @@ WIN_SCORE: int = 5  # must match server
 #              on success, or None if the connection is closed or the data is invalid.
 def recv_state(sock_file: TextIO) -> Optional[Tuple[int, int, int, int, int, int]]:
     """
-    Read a single state update line from the server.
+    Read a single PLAINTEXT state update line from the server (for spectators).
 
     Expected format (one line, space-separated):
         <leftPaddleY> <rightPaddleY> <ballX> <ballY> <leftScore> <rightScore>
@@ -76,6 +77,41 @@ def recv_state(sock_file: TextIO) -> Optional[Tuple[int, int, int, int, int, int
         return None
 
 
+def recv_encrypted_state(sock_file: TextIO) -> Optional[Tuple[int, int, int, int, int, int]]:
+    """
+    Read a single ENCRYPTED state update line from the server (for left/right players).
+
+    Each line from the server is:
+        encrypt_data("<l_y> <r_y> <b_x> <b_y> <l_score> <r_score>") + b"\\n"
+    """
+    try:
+        line: str = sock_file.readline()
+        if not line:
+            print("recv_encrypted_state: empty line (server closed connection).")
+            return None
+
+        token = line.strip()
+        if not token:
+            print("recv_encrypted_state: empty token line.")
+            return None
+
+        try:
+            plaintext: str = decrypt_data(token)
+        except Exception as e:
+            print("recv_encrypted_state: failed to decrypt:", e)
+            return None
+
+        parts = plaintext.strip().split()
+        if len(parts) != 6:
+            print("recv_encrypted_state: bad decrypted state:", repr(plaintext))
+            return None
+
+        l_y, r_y, b_x, b_y, l_score, r_score = map(int, parts)
+        return l_y, r_y, b_x, b_y, l_score, r_score
+    except Exception as e:
+        print("recv_encrypted_state: exception while reading:", e)
+        return None
+
 # ---------------------------------------------------------------------------------------------
 # receive_loop function
 # ---------------------------------------------------------------------------------------------
@@ -88,16 +124,27 @@ def recv_state(sock_file: TextIO) -> Optional[Tuple[int, int, int, int, int, int
 # Post:        While valid data is received, shared_state is updated. If data is invalid
 #              or the server closes the connection, shared_state["connected"] is set to
 #              False and the thread exits.
-def receive_loop(sock_file: TextIO, shared_state: Dict[str, int], state_lock: Lock) -> None:
+def receive_loop(
+    sock_file: TextIO,
+    shared_state: Dict[str, int],
+    state_lock: Lock,
+    encrypted: bool,
+) -> None:
     """
     Background thread function that continuously receives state updates from the server
     and writes them into shared_state.
+
+    If encrypted is True, uses recv_encrypted_state().
+    Otherwise, uses recv_state() for plaintext (spectators).
     """
     while True:
-        state = recv_state(sock_file)
+        if encrypted:
+            state = recv_encrypted_state(sock_file)
+        else:
+            state = recv_state(sock_file)
+
         if state is None:
             with state_lock:
-                # Use 0/1 for int compatibility; bool works as an int subclass.
                 shared_state["connected"] = 0
             print("receive_loop: server closed connection or bad data, stopping receiver.")
             break
@@ -152,7 +199,7 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
     # Start background receiver thread
     recv_thread: Thread = Thread(
         target=receive_loop,
-        args=(sock_file, shared_state, state_lock),
+        args=(sock_file, shared_state, state_lock, not is_spectator),
         daemon=True,
     )
     recv_thread.start()
@@ -245,14 +292,15 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
 
                     # Press R to send "ready" AFTER game over (only once per game)
                     if (lScore >= WIN_SCORE or rScore >= WIN_SCORE) and event.key == pygame.K_r:
-                        if not sent_ready:
+                        if not sent_ready and not is_spectator:
                             try:
-                                client.sendall(b"ready\n")
+                                client.sendall(encrypt_data("ready") + b"\n")
                                 sent_ready = True
-                                print("Sent 'ready' for rematch to server.")
+                                print("Sent ENCRYPTED 'ready' for rematch to server.")
                             except Exception as e:
                                 print("Error sending ready:", e)
                                 running = False
+
 
             elif event.type == pygame.KEYUP:
                 if not is_spectator and event.key in (pygame.K_UP, pygame.K_DOWN):
@@ -265,15 +313,22 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
                 running = False
 
         # -------------------------------------------------------------------------------------
-        # Send this client's movement to the server ("up", "down", or "").
-        # Spectators always send "" (no movement).
+        # Send this client's movement to the server:
+        #   Players: ENCRYPTED "up"/"down"/"" (Fernet token + newline)
+        #   Spectators: plaintext "" (server ignores spectator input anyway)
         # -------------------------------------------------------------------------------------
         try:
             move_str: str = "" if is_spectator else playerPaddleObj.moving
-            client.sendall((move_str + "\n").encode())
+            if is_spectator:
+                # Keep spectator traffic simple/plaintext
+                client.sendall((move_str + "\n").encode("utf-8"))
+            else:
+                token = encrypt_data(move_str)
+                client.sendall(token + b"\n")
         except Exception as e:
             print("Error sending to server:", e)
             running = False
+
 
         # -------------------------------------------------------------------------------------
         # Read latest state snapshot from shared_state (non-blocking)
@@ -353,7 +408,71 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
     client.close()
     pygame.quit()
     return
+# ---------------------------------------------------------------------------------------------
+# auth_over_socket function
+# ---------------------------------------------------------------------------------------------
+# Author:      Rudwika Manne
+# Purpose:     Provide a simple text-based username/password registration + login over the
+#              existing TCP socket (command-line mode). Matches the server's auth_player()
+#              protocol and handles both register and login interactions.
+# Pre:         client is a connected TCP socket. Server will first send an AUTH intro line
+#              and then expect lines of the form:
+#                    register <username> <password>
+#                    login <username> <password>
+# Post:        Returns True if the server replies with an OK message (successful auth).
+#              Returns False on any error, failed auth attempt, or closed connection.
 
+def auth_over_socket(client: socket.socket) -> bool:
+    """
+    Simple text-based registration/login over the existing TCP socket.
+
+    Protocol (matches server's auth_player):
+        - Server sends an 'AUTH ...' intro line.
+        - Client sends lines:
+              register <username> <password>
+           or login <username> <password>
+        - Server replies with:
+              OK registered
+           or OK logged-in
+           or ERR ...
+    Returns True on successful auth, False on failure.
+    """
+    try:
+        intro = client.recv(1024).decode("utf-8", errors="ignore").strip()
+        if intro:
+            print(intro)
+    except Exception as e:
+        print(f"Error receiving auth intro: {e}")
+        return False
+
+    while True:
+        choice = input("Do you want to register [r] or login [l]? ").strip().lower()
+        if choice not in ("r", "l"):
+            print("Please type 'r' or 'l'.")
+            continue
+
+        username = input("Username: ").strip()
+        password = input("Password: ").strip()
+        cmd = "register" if choice == "r" else "login"
+        message = f"{cmd} {username} {password}\n"
+        try:
+            client.sendall(message.encode("utf-8"))
+        except Exception as e:
+            print(f"Error sending auth command: {e}")
+            return False
+
+        try:
+            resp = client.recv(1024).decode("utf-8", errors="ignore").strip()
+        except Exception as e:
+            print(f"Error receiving auth response: {e}")
+            return False
+
+        print("Server:", resp)
+        if resp.startswith("OK"):
+            # Success!
+            return True
+        else:
+            print("Authentication failed, please try again.")
 
 # ---------------------------------------------------------------------------------------------
 # joinServer function
@@ -411,6 +530,16 @@ def joinServer(ip: str, port: str, errorLabel, app) -> None:
         errorLabel.update()
         client.close()
         return
+
+    # -------------------------------------------------------------------------
+    # Player registration + login (LEFT/RIGHT only; spectators skip auth)
+    # -------------------------------------------------------------------------
+    if playerPaddle in ("left", "right"):
+        if not auth_over_socket(client):
+            errorLabel.config(text="Authentication failed or connection closed.")
+            errorLabel.update()
+            client.close()
+            return
 
     # Close Tkinter window and start the game
     app.withdraw()  # Hide Tk window
@@ -517,6 +646,13 @@ def joinServer_cli() -> None:
         print(f"Error receiving config: {e}")
         client.close()
         return
+
+    # Auth only for real players
+    if playerPaddle in ("left", "right"):
+        if not auth_over_socket(client):
+            print("Authentication failed or connection closed.")
+            client.close()
+            return
 
     playGame(screenWidth, screenHeight, playerPaddle, client)
 
