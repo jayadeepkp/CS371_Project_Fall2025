@@ -12,17 +12,17 @@
 # =================================================================================================
 
 import socket
-from typing import Optional, Tuple, TextIO
+from typing import Optional, Tuple, TextIO, Dict
 from pathlib import Path
 from threading import Thread, Lock
 
 import pygame
-from assets.code.helperCode import *
+from assets.code.helperCode import *  # Paddle, Ball, updateScore, etc.
 
 # Try to import tkinter; if not available (e.g., some macOS Python builds), fall back to CLI.
 try:
     import tkinter as tk
-    HAS_TK = True
+    HAS_TK: bool = True
 except Exception:
     HAS_TK = False
     tk = None
@@ -30,25 +30,25 @@ except Exception:
 # ---------------------------------------------------------------------------------------------
 # Constants / asset paths
 # ---------------------------------------------------------------------------------------------
-BASE_DIR = Path(__file__).resolve().parent          # .../CS371_Project_Fall2025/pong
-ASSETS_DIR = BASE_DIR / "assets"
-FONTS_DIR = ASSETS_DIR / "fonts"
-IMAGES_DIR = ASSETS_DIR / "images"
-SOUNDS_DIR = ASSETS_DIR / "sounds"
+BASE_DIR: Path = Path(__file__).resolve().parent          # .../pong
+ASSETS_DIR: Path = BASE_DIR / "assets"
+FONTS_DIR: Path = ASSETS_DIR / "fonts"
+IMAGES_DIR: Path = ASSETS_DIR / "images"
+SOUNDS_DIR: Path = ASSETS_DIR / "sounds"
 
-WIN_SCORE = 5  # must match server
+WIN_SCORE: int = 5  # must match server
 
 
 # ---------------------------------------------------------------------------------------------
 # recv_state function
-# Author:      Harshini Ponnam
-# Purpose:     Reads a single state line from the server and parses it into paddle positions,
-#              ball position, and scores for both players.
-# Pre:         sock_file is a text-mode file-like object wrapping the TCP socket, opened
-#              for reading with one state update per line.
-# Post:        Returns a 6-tuple (l_y, r_y, b_x, b_y, l_score, r_score) on success, or
-#              None if the connection is closed or the data format is invalid.
 # ---------------------------------------------------------------------------------------------
+# Author:      Harshini Ponnam
+# Purpose:     Read one line of game state from the server and parse it.
+# Pre:         sock_file is a text-mode file-like object wrapping the TCP socket with
+#              one state update per line in the format:
+#                  <leftPaddleY> <rightPaddleY> <ballX> <ballY> <leftScore> <rightScore>
+# Post:        Returns a 6-tuple of integers (l_y, r_y, b_x, b_y, l_score, r_score)
+#              on success, or None if the connection is closed or the data is invalid.
 def recv_state(sock_file: TextIO) -> Optional[Tuple[int, int, int, int, int, int]]:
     """
     Read a single state update line from the server.
@@ -61,7 +61,7 @@ def recv_state(sock_file: TextIO) -> Optional[Tuple[int, int, int, int, int, int
         or None if server closed or sent bad data.
     """
     try:
-        line = sock_file.readline()
+        line: str = sock_file.readline()
         if not line:
             print("recv_state: empty line (server closed connection).")
             return None
@@ -78,17 +78,17 @@ def recv_state(sock_file: TextIO) -> Optional[Tuple[int, int, int, int, int, int
 
 # ---------------------------------------------------------------------------------------------
 # receive_loop function
-# Author:      Harshini Ponnam
-# Purpose:     Runs in a background thread to continuously receive state updates from the
-#              server and write them into a shared dictionary used by the main game loop.
-# Pre:         sock_file wraps the connected TCP socket; shared_state is a dict containing
-#              keys for paddle positions, ball position, scores, and a 'connected' flag;
-#              state_lock is a threading.Lock protecting access to shared_state.
-# Post:        While valid data is received, shared_state is updated with the latest values.
-#              If the server closes or sends bad data, 'connected' is set to False and the
-#              thread exits, allowing the main loop to shut down cleanly.
 # ---------------------------------------------------------------------------------------------
-def receive_loop(sock_file: TextIO, shared_state: dict, state_lock: Lock) -> None:
+# Author:      Harshini Ponnam
+# Purpose:     Continuously read state updates from the server on a background thread and
+#              store the newest values into a shared dictionary.
+# Pre:         sock_file wraps the connected TCP socket; shared_state is a dict with keys
+#              "l_y", "r_y", "b_x", "b_y", "lScore", "rScore", and "connected"; state_lock
+#              is a Lock protecting access to shared_state.
+# Post:        While valid data is received, shared_state is updated. If data is invalid
+#              or the server closes the connection, shared_state["connected"] is set to
+#              False and the thread exits.
+def receive_loop(sock_file: TextIO, shared_state: Dict[str, int], state_lock: Lock) -> None:
     """
     Background thread function that continuously receives state updates from the server
     and writes them into shared_state.
@@ -97,7 +97,8 @@ def receive_loop(sock_file: TextIO, shared_state: dict, state_lock: Lock) -> Non
         state = recv_state(sock_file)
         if state is None:
             with state_lock:
-                shared_state["connected"] = False
+                # Use 0/1 for int compatibility; bool works as an int subclass.
+                shared_state["connected"] = 0
             print("receive_loop: server closed connection or bad data, stopping receiver.")
             break
 
@@ -114,41 +115,42 @@ def receive_loop(sock_file: TextIO, shared_state: dict, state_lock: Lock) -> Non
 
 # ---------------------------------------------------------------------------------------------
 # Main game loop - uses shared_state updated by background thread
+# ---------------------------------------------------------------------------------------------
 # Author:      Jayadeep Kothapalli
 # Purpose:     Render the Pong game state from the server and send local paddle movement.
-#              Handles keyboard input, draws paddles/ball/score, and shows a "Press R to
-#              Play Again" / "Waiting for other player..." message after someone wins.
-#              When the player presses R, sends "ready" to the server. A new game starts
-#              when the server resets the scores (after both players are ready).
-# Pre:         screenWidth, screenHeight, and playerPaddle are provided by the server's
-#              config line. client is a connected TCP socket. Assets must be present in
-#              the assets/ directory (fonts, sounds, logo).
-# Post:        When the window is closed or connection drops, the socket and pygame
-#              resources are cleaned up and the function returns.
-# ---------------------------------------------------------------------------------------------
+#              Handles keyboard input, draws paddles/ball/score, and shows a win message
+#              when someone reaches WIN_SCORE. When the player presses R after game over,
+#              the client sends "ready" to the server. A new game starts when the server
+#              resets the scores (after both players are ready).
+# Pre:         screenWidth, screenHeight, and playerPaddle ("left", "right", or "spec")
+#              are provided by the server's config line. client is a connected TCP socket.
+#              Asset files (fonts, sounds, logo) exist in the assets directory.
+# Post:        When the user closes the window or the connection drops, the loop ends,
+#              the socket and pygame are cleaned up, and the function returns.
 def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: socket.socket) -> None:
     print("Starting playGame with:", screenWidth, screenHeight, playerPaddle)
 
     # Treat "spec" as spectator mode
-    is_spectator = (playerPaddle == "spec")
+    is_spectator: bool = (playerPaddle == "spec")
 
     # Wrap the socket in a file-like object for line-based reading
-    sock_file = client.makefile("r")
+    sock_file: TextIO = client.makefile("r")
 
     # Shared state between network thread and game loop
-    state_lock = Lock()
-    shared_state = {
+    # Using int for everything; "connected" uses 1/0 as a simple flag.
+    state_lock: Lock = Lock()
+    shared_state: Dict[str, int] = {
         "l_y": screenHeight // 2,
         "r_y": screenHeight // 2,
         "b_x": screenWidth // 2,
         "b_y": screenHeight // 2,
         "lScore": 0,
         "rScore": 0,
-        "connected": True,
+        "connected": 1,
     }
 
     # Start background receiver thread
-    recv_thread = Thread(
+    recv_thread: Thread = Thread(
         target=receive_loop,
         args=(sock_file, shared_state, state_lock),
         daemon=True,
@@ -161,7 +163,7 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
 
     # Constants
     WHITE = (255, 255, 255)
-    clock = pygame.time.Clock()
+    clock: pygame.time.Clock = pygame.time.Clock()
 
     # Load fonts
     scoreFont = pygame.font.Font(str(FONTS_DIR / "pong-score.ttf"), 32)
@@ -189,9 +191,9 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
         centerLine.append(pygame.Rect((screenWidth / 2) - 5, i, 5, 5))
 
     # Paddle properties and init
-    paddleHeight = 50
-    paddleWidth = 10
-    paddleStartPosY = (screenHeight / 2) - (paddleHeight / 2)
+    paddleHeight: int = 50
+    paddleWidth: int = 10
+    paddleStartPosY: float = (screenHeight / 2) - (paddleHeight / 2)
     leftPaddle = Paddle(pygame.Rect(10, paddleStartPosY, paddleWidth, paddleHeight))
     rightPaddle = Paddle(
         pygame.Rect(screenWidth - 20, paddleStartPosY, paddleWidth, paddleHeight)
@@ -213,13 +215,15 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
         playerPaddleObj = leftPaddle  # dummy; we won't move it from input
 
     # Scores and previous values for sound & rematch logic
-    lScore = rScore = 0
-    prev_lScore = prev_rScore = 0
-    prev_ball_y = ball.rect.y
+    lScore: int = 0
+    rScore: int = 0
+    prev_lScore: int = 0
+    prev_rScore: int = 0
+    prev_ball_y: int = ball.rect.y
 
-    sent_ready = False  # whether THIS client has already sent "ready" for the current game
+    sent_ready: bool = False  # whether THIS client has already sent "ready" for the current game
 
-    running = True
+    running: bool = True
 
     while running:
         # Wipe the screen
@@ -239,7 +243,7 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
                     elif event.key == pygame.K_UP:
                         playerPaddleObj.moving = "up"
 
-                    # Press R to send "ready" AFTER game over (only once)
+                    # Press R to send "ready" AFTER game over (only once per game)
                     if (lScore >= WIN_SCORE or rScore >= WIN_SCORE) and event.key == pygame.K_r:
                         if not sent_ready:
                             try:
@@ -265,7 +269,7 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
         # Spectators always send "" (no movement).
         # -------------------------------------------------------------------------------------
         try:
-            move_str = "" if is_spectator else playerPaddleObj.moving
+            move_str: str = "" if is_spectator else playerPaddleObj.moving
             client.sendall((move_str + "\n").encode())
         except Exception as e:
             print("Error sending to server:", e)
@@ -282,11 +286,11 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
             lScore = shared_state["lScore"]
             rScore = shared_state["rScore"]
 
-        # Detect game-over → new-game transition (server reset)
-        game_was_over = (prev_lScore >= WIN_SCORE or prev_rScore >= WIN_SCORE)
-        game_is_over = (lScore >= WIN_SCORE or rScore >= WIN_SCORE)
+        # Detect game-over → new-game transition (server reset scores)
+        game_was_over: bool = (prev_lScore >= WIN_SCORE or prev_rScore >= WIN_SCORE)
+        game_is_over: bool = (lScore >= WIN_SCORE or rScore >= WIN_SCORE)
         if game_was_over and not game_is_over:
-            # Scores went from win back to non-win ⇒ new game started.
+            # Scores went from win back to non-win ⇒ new game started ⇒ clear our ready flag.
             sent_ready = False
 
         # Update paddles and ball with latest state
@@ -308,19 +312,18 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
         ):
             bounceSound.play()
 
-        # If the game is over, display the win message + R prompts (no boxes, just text)
+        # If the game is over, display only the win message (no extra R text)
         if lScore >= WIN_SCORE or rScore >= WIN_SCORE:
             # Big win text (use ALL CAPS so the font has glyphs)
-            winText = "PLAYER 1 WINS!" if lScore >= WIN_SCORE else "PLAYER 2 WINS!"
+            winText: str = "PLAYER 1 WINS!" if lScore >= WIN_SCORE else "PLAYER 2 WINS!"
             textSurface = winFont.render(winText, False, WHITE, (0, 0, 0))
             textRect = textSurface.get_rect()
             textRect.center = (screenWidth // 2, screenHeight // 2)
             winMessage = screen.blit(textSurface, textRect)
-
         else:
             # Ball is already updated by server; just draw it.
             pygame.draw.rect(screen, WHITE, ball)
-            winMessage = pygame.Rect(0, 0, 0, 0)  # nothing to update for winMessage
+            winMessage = pygame.Rect(0, 0, 0, 0)  # nothing special to update
 
         # Draw the dotted center line
         for i in centerLine:
@@ -354,17 +357,23 @@ def playGame(screenWidth: int, screenHeight: int, playerPaddle: str, client: soc
 
 # ---------------------------------------------------------------------------------------------
 # joinServer function
-# Author:      Rudwika Manne
 # ---------------------------------------------------------------------------------------------
+# Author:      Rudwika Manne
+# Purpose:     Connect the client to the Pong server using the IP and port from the Tkinter UI,
+#              receive the initial configuration line, and then start the game loop.
+# Pre:         Tkinter window is running. User has entered IP and port. Server is already
+#              running and listening on that address and port.
+# Post:        On success, hides the Tkinter window and calls playGame(). On failure, shows
+#              an error message in errorLabel and leaves the window open.
 def joinServer(ip: str, port: str, errorLabel, app) -> None:
     """
     Fired when the Join button is clicked on the Tkinter screen.
     """
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     # Validate and convert port
     try:
-        server_port = int(port)
+        server_port: int = int(port)
     except ValueError:
         errorLabel.config(text="Port must be an integer.")
         errorLabel.update()
@@ -380,7 +389,7 @@ def joinServer(ip: str, port: str, errorLabel, app) -> None:
 
     # Receive initial configuration from server: "width height side\n"
     try:
-        cfg = client.recv(1024).decode().strip()
+        cfg: str = client.recv(1024).decode().strip()
         parts = cfg.split()
         if len(parts) != 3:
             errorLabel.config(text=f"Bad config from server: {cfg}")
@@ -388,9 +397,9 @@ def joinServer(ip: str, port: str, errorLabel, app) -> None:
             client.close()
             return
 
-        screenWidth = int(parts[0])
-        screenHeight = int(parts[1])
-        playerPaddle = parts[2]  # "left" or "right" or "spec"
+        screenWidth: int = int(parts[0])
+        screenHeight: int = int(parts[1])
+        playerPaddle: str = parts[2]  # "left" or "right" or "spec"
 
         errorLabel.config(
             text=f"Connected! Screen: {screenWidth}x{screenHeight}, you are {playerPaddle}."
@@ -411,8 +420,13 @@ def joinServer(ip: str, port: str, errorLabel, app) -> None:
 
 # ---------------------------------------------------------------------------------------------
 # startScreen function
-# Author:      Rudwika Manne, Jayadeep Kothapalli
 # ---------------------------------------------------------------------------------------------
+# Author:      Rudwika Manne, Jayadeep Kothapalli
+# Purpose:     Display a Tkinter-based start screen that asks the user for server IP and port.
+#              Shows the project logo and a Join button that calls joinServer().
+# Pre:         Tkinter is available (HAS_TK = True) and logo.png is present in IMAGES_DIR.
+# Post:        When the user successfully connects, the Tkinter window hides and playGame()
+#              starts. Otherwise, error messages are displayed in the same window.
 def startScreen() -> None:
     """Tkinter-based start screen with logo, IP, and port fields."""
     app = tk.Tk()
@@ -454,23 +468,29 @@ def startScreen() -> None:
 
 # ---------------------------------------------------------------------------------------------
 # joinServer_cli function
-# Author:      Rudwika Manne
 # ---------------------------------------------------------------------------------------------
+# Author:      Rudwika Manne
+# Purpose:     Provide a simple command-line way to connect to the server when Tkinter
+#              is not available (e.g., some headless or minimal Python environments).
+# Pre:         Program is run in a terminal with stdin/stdout available. Server is running
+#              and reachable at the entered IP/port.
+# Post:        On success, calls playGame() with the server-provided configuration. On
+#              failure, prints an error and returns without starting the game.
 def joinServer_cli() -> None:
     """
     Simple command-line join for environments without Tkinter.
     Asks for server IP and port in the terminal.
     """
-    ip = input("Server IP [127.0.0.1]: ").strip() or "127.0.0.1"
-    port_str = input("Server Port [6000]: ").strip() or "6000"
+    ip: str = input("Server IP [127.0.0.1]: ").strip() or "127.0.0.1"
+    port_str: str = input("Server Port [6000]: ").strip() or "6000"
 
     try:
-        port = int(port_str)
+        port: int = int(port_str)
     except ValueError:
         print("Port must be an integer.")
         return
 
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     try:
         client.connect((ip, port))
@@ -480,16 +500,16 @@ def joinServer_cli() -> None:
 
     try:
         # Expect config line: "width height side\n"
-        cfg = client.recv(1024).decode().strip()
+        cfg: str = client.recv(1024).decode().strip()
         parts = cfg.split()
         if len(parts) != 3:
             print(f"Bad config from server: {cfg}")
             client.close()
             return
 
-        screenWidth = int(parts[0])
-        screenHeight = int(parts[1])
-        playerPaddle = parts[2]  # "left" or "right" or "spec"
+        screenWidth: int = int(parts[0])
+        screenHeight: int = int(parts[1])
+        playerPaddle: str = parts[2]  # "left" or "right" or "spec"
 
         print(f"Connected! Screen: {screenWidth}x{screenHeight}, you are {playerPaddle}.")
 
