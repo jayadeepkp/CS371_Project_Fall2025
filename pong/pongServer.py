@@ -164,7 +164,7 @@ def start_leaderboard_server() -> None:
 # Player registration + authentication (plaintext commands, encrypted gameplay)
 # ---------------------------------------------------------------------------------------------
 
-# Author(s):   Rudwika Manne
+# Author:   Rudwika Manne
 # Purpose:     Simple username/password registration + login before the game starts.
 #              Protocol (per client, PLAINTEXT lines):
 #                  register <username> <password>

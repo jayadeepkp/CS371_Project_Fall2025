@@ -76,7 +76,17 @@ def recv_state(sock_file: TextIO) -> Optional[Tuple[int, int, int, int, int, int
         print("recv_state: exception while reading:", e)
         return None
 
-
+# ---------------------------------------------------------------------------------------------
+# recv_encrypted_state function
+# ---------------------------------------------------------------------------------------------
+# Author:      Harshini Ponnam
+# Purpose:     Read one encrypted line of game state from the server and decrypt it.
+# Pre:         sock_file is a text-mode file-like object over the TCP socket. Each line
+#              contains a Fernet-encrypted token created from the plaintext state string:
+#              "<leftPaddleY> <rightPaddleY> <ballX> <ballY> <leftScore> <rightScore>".
+# Post:        Returns a 6-tuple of integers (l_y, r_y, b_x, b_y, l_score, r_score)
+#              on success, or None if the connection is closed or the data cannot be
+#              decrypted or parsed.
 def recv_encrypted_state(sock_file: TextIO) -> Optional[Tuple[int, int, int, int, int, int]]:
     """
     Read a single ENCRYPTED state update line from the server (for left/right players).
