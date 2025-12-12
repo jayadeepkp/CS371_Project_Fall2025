@@ -28,7 +28,7 @@ Versioning
 ==========
 
 GitHub Link:
-    https://github.com/jayadeepkp/CS371_Project_Fall2025
+    https://github.com/jayadeepkp/classic-Atari-game-Pong-with-a-twist
 
 
 General Info
